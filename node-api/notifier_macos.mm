@@ -7,6 +7,9 @@
 #include <string>
 #include <unordered_map>
 
+@interface NTNNotificationDelegate : NSObject <NSUserNotificationCenterDelegate>
+@end
+
 namespace {
 
 static NSString* const kNotifyIdKey = @"__toasted_id";
@@ -19,14 +22,11 @@ struct NotificationContext {
 std::mutex g_contexts_mutex;
 std::unordered_map<std::string, NotificationContext*> g_contexts;
 
-@interface NotificationDelegate : NSObject <NSUserNotificationCenterDelegate>
-@end
-
-NotificationDelegate* g_delegate = nil;
+NTNNotificationDelegate* g_delegate = nil;
 
 static void EnsureDelegateInstalled() {
   if (!g_delegate) {
-    g_delegate = [NotificationDelegate new];
+    g_delegate = [NTNNotificationDelegate new];
   }
   NSUserNotificationCenter* center = [NSUserNotificationCenter defaultUserNotificationCenter];
   center.delegate = g_delegate;
@@ -67,7 +67,7 @@ static std::string NewNotificationId() {
 
 }  // namespace
 
-@implementation NotificationDelegate
+@implementation NTNNotificationDelegate
 
 - (BOOL)userNotificationCenter:(NSUserNotificationCenter*)center
        shouldPresentNotification:(NSUserNotification*)notification {
