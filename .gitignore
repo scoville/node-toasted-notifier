@@ -101,6 +101,7 @@
 # ----------------------------------------
 # [WL]: Node-API module
 # ----------------------------------------
-!notifier.cpp
-!CMakeLists.txt
+!binding.gyp
 !try.cjs
+!.clang-format
+!/node-api

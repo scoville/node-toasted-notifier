@@ -51,7 +51,8 @@
         "windows 11"
     ],
     "scripts": {
-        "build:node": "cmake-js",
+        "build": "node-gyp rebuild",
+        "clean": "node-gyp clean",
         "prepare": "husky install",
         "pretest": "npm run lint",
         "lint": "eslint example/*.js lib/*.js notifiers/*.js test/**/*.js index.js",
@@ -92,7 +93,6 @@
         "@types/semver": "^7.7.0",
         "@types/uuid": "^10.0.0",
         "all-contributors-cli": "^6.26.1",
-        "cmake-js": "^8.0.0",
         "copyfiles": "^2.4.1",
         "eslint": "9.28.0",
         "eslint-plugin-chai-friendly": "^1.0.1",
