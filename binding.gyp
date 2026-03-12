@@ -16,8 +16,8 @@
                 'cflags+': ['-fvisibility=hidden'],
                 'sources': ['node-api/notifier_macos.mm'],
                 'xcode_settings': {
-                    'OTHER_CFLAGS': ['-mmacos-version-min=10.15', '-std=c++20'],
-                    'OTHER_LDFLAGS': ['-framework AuthenticationServices'],
+                  'OTHER_CFLAGS': ['-mmacos-version-min=10.15', '-std=c++20'],
+                  'OTHER_LDFLAGS': ['-framework AuthenticationServices', '-framework UserNotifications'],
                     'GCC_GENERATE_DEBUGGING_SYMBOLS': 'YES',
                     'GCC_SYMBOLS_PRIVATE_EXTERN': 'YES', # -fvisibility=hidden
                     'DEBUG_INFORMATION_FORMAT': 'dwarf-with-dsym',
