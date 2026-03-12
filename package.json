@@ -52,6 +52,7 @@
     ],
     "scripts": {
         "build": "node-gyp rebuild",
+        "build:electron": "node-gyp rebuild --target=36.3.2 --runtime=electron --dist-url=https://electronjs.org/headers",
         "clean": "node-gyp clean",
         "prepare": "husky install",
         "pretest": "npm run lint",

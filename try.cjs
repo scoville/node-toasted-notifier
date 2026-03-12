@@ -20,6 +20,7 @@ notify(
         console.log('got metadata', metadata);
 
         if (err) {
+            // Notification error: [Error: The operation couldn’t be completed. (UNErrorDomain error 1.)]
             console.log('Notification error:', err);
             return;
         }

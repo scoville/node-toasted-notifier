@@ -30,6 +30,11 @@ static bool IsRunningInAppBundle() {
   }
 
   // Probably running in Electron.
+  NSString* bundle_id = [[NSBundle mainBundle] bundleIdentifier];
+  if (bundle_id && [bundle_id length] > 0) {
+    // In debug builds: "com.github.Electron"
+    NSLog(@"toasted-notifier bundle id: %@", bundle_id);
+  }
   return [[bundle_path pathExtension] isEqualToString:@"app"];
 }
 
