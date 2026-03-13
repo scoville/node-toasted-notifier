@@ -247,23 +247,16 @@ static std::string MakeActionIdentifier(const std::string& title) {
   return std::string("action:") + title;
 }
 
-static void ScheduleTimeout(std::string notify_id,
-                            UNUserNotificationCenter* center,
-                            double timeout_seconds) {
+static void ScheduleTimeout(std::string notify_id, double timeout_seconds) {
   if (timeout_seconds <= 0) {
     return;
   }
 
-  NSString* request_id = [NSString stringWithUTF8String:notify_id.c_str()];
   std::string timeout_notify_id = std::move(notify_id);
   dispatch_time_t when = dispatch_time(
       DISPATCH_TIME_NOW, (int64_t)(timeout_seconds * NSEC_PER_SEC));
   dispatch_after(when, dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-    if (TryCompleteWithActivation(timeout_notify_id, "timeout", std::nullopt)) {
-      NSArray* identifiers = @[ request_id ];
-      [center removeDeliveredNotificationsWithIdentifiers:identifiers];
-      [center removePendingNotificationRequestsWithIdentifiers:identifiers];
-    }
+    TryCompleteWithActivation(timeout_notify_id, "timeout", std::nullopt);
   });
 }
 
@@ -578,7 +571,7 @@ static Napi::Value Notify(const Napi::CallbackInfo& info) {
                                            content:content
                                            trigger:nil];
 
-  ScheduleTimeout(notify_id, center, timeout_seconds);
+  ScheduleTimeout(notify_id, timeout_seconds);
 
   [center getNotificationSettingsWithCompletionHandler:^(
               UNNotificationSettings* settings) {
