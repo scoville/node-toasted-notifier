@@ -54,6 +54,7 @@ static bool TryCompleteWithActivation(const std::string& id,
                                       const std::string& activation_value) {
   NotificationContext* ctx = nullptr;
   {
+    // FIXME: got a segfault (EXC_BAD_ACCESS / SIGSEGV) here.
     std::lock_guard<std::mutex> lock(g_contexts_mutex);
     auto it = g_contexts.find(id);
     if (it == g_contexts.end()) {
@@ -83,6 +84,7 @@ static bool TryCompleteWithError(const std::string& id,
                                  const std::string& message) {
   NotificationContext* ctx = nullptr;
   {
+    // FIXME: likely to have the same problem as the other mutex.
     std::lock_guard<std::mutex> lock(g_contexts_mutex);
     auto it = g_contexts.find(id);
     if (it == g_contexts.end()) {
@@ -124,6 +126,7 @@ static void ScheduleTimeout(const std::string& notify_id,
   NSString* request_id = [NSString stringWithUTF8String:notify_id.c_str()];
   dispatch_time_t when = dispatch_time(
       DISPATCH_TIME_NOW, (int64_t)(timeout_seconds * NSEC_PER_SEC));
+  // FIXME: got a segfault (EXC_BAD_ACCESS / SIGSEGV) here.
   dispatch_after(when, dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
     if (TryCompleteWithActivation(notify_id, "timeout")) {
       NSArray* identifiers = @[ request_id ];
