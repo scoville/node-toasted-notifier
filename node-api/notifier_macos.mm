@@ -16,6 +16,12 @@ namespace {
 struct NotificationContext {
   Napi::ThreadSafeFunction tsfn;
   std::atomic_bool completed{false};
+
+  explicit NotificationContext(Napi::ThreadSafeFunction callback_tsfn)
+      : tsfn(std::move(callback_tsfn)) {}
+
+  NotificationContext(const NotificationContext&) = delete;
+  NotificationContext& operator=(const NotificationContext&) = delete;
 };
 
 std::mutex g_contexts_mutex;
@@ -141,8 +147,14 @@ static void ScheduleTimeout(std::string notify_id,
          withCompletionHandler:
              (void (^)(UNNotificationPresentationOptions options))
                  completionHandler {
-  completionHandler(UNNotificationPresentationOptionBanner |
-                    UNNotificationPresentationOptionSound);
+  UNNotificationPresentationOptions options =
+      UNNotificationPresentationOptionSound;
+  if (@available(macOS 11.0, *)) {
+    options |= UNNotificationPresentationOptionBanner;
+  } else {
+    options |= UNNotificationPresentationOptionAlert;
+  }
+  completionHandler(options);
 }
 
 - (void)userNotificationCenter:(UNUserNotificationCenter*)center
@@ -258,8 +270,9 @@ static Napi::Value Notify(const Napi::CallbackInfo& info) {
   NSString* request_id = [NSString stringWithUTF8String:notify_id.c_str()];
 
   if (has_callback) {
-    auto ctx = std::make_shared<NotificationContext>(NotificationContext{
-        Napi::ThreadSafeFunction::New(env, callback, "notify_callback", 0, 1)});
+    auto ctx = std::make_shared<NotificationContext>(
+        Napi::ThreadSafeFunction::New(env, callback, "notify_callback", 0,
+                                      1));
     std::lock_guard<std::mutex> lock(g_contexts_mutex);
     g_contexts[notify_id] = ctx;
   }
