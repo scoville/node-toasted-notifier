@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
+#import <objc/runtime.h>
 #import <UserNotifications/UserNotifications.h>
 
 #include <napi.h>
@@ -14,10 +15,24 @@
 #include <unordered_set>
 #include <vector>
 
-@interface NTNNotificationDelegate : NSObject <UNUserNotificationCenterDelegate>
+@interface UNUserNotificationCenter (NTNDelegateProxy)
+- (void)ntn_setDelegate:(id<UNUserNotificationCenterDelegate>)delegate;
+@end
+
+@interface NTNNotificationDelegate : NSObject <UNUserNotificationCenterDelegate> {
+ @private
+  id<UNUserNotificationCenterDelegate> downstream_delegate_;
+}
+@property(nonatomic, assign) id<UNUserNotificationCenterDelegate> downstreamDelegate;
 @end
 
 namespace {
+
+static bool OpenURLString(const std::string& value);
+static bool TryCompleteWithActivation(const std::string& id,
+                                      const std::string& activation_type,
+                                      const std::optional<std::string>&
+                                          activation_value = std::nullopt);
 
 struct NotificationContext {
   Napi::ThreadSafeFunction tsfn;
@@ -38,6 +53,75 @@ std::unordered_map<std::string, std::shared_ptr<NotificationContext>>
     g_contexts;
 
 NTNNotificationDelegate* g_delegate = nil;
+dispatch_once_t g_delegate_swizzle_once;
+
+static NSString* const kNTNManagedNotificationKey = @"toastedNotifierManaged";
+static NSString* const kNTNOpenURLKey = @"open";
+static NSString* const kNTNReplyKey = @"reply";
+
+static bool IsManagedUserInfo(NSDictionary* user_info) {
+  if (!user_info) {
+    return false;
+  }
+
+  id marker = user_info[kNTNManagedNotificationKey];
+  return marker && [marker respondsToSelector:@selector(boolValue)] &&
+         [marker boolValue];
+}
+
+static bool IsManagedNotification(UNNotification* notification) {
+  if (!notification) {
+    return false;
+  }
+
+  return IsManagedUserInfo(notification.request.content.userInfo);
+}
+
+static void HandleManagedNotificationResponse(UNNotificationResponse* response) {
+  NSString* request_id = response.notification.request.identifier;
+  if (!request_id) {
+    return;
+  }
+
+  std::string activation_type = "activate";
+  std::optional<std::string> activation_value = std::nullopt;
+  NSString* action_id = response.actionIdentifier;
+  if ([action_id isEqualToString:UNNotificationDismissActionIdentifier]) {
+    activation_type = "dismiss";
+  } else if ([action_id
+                 isEqualToString:UNNotificationDefaultActionIdentifier]) {
+    activation_type = "activate";
+  } else if ([response isKindOfClass:[UNTextInputNotificationResponse class]]) {
+    activation_type = "replied";
+    NSString* user_text =
+        [(UNTextInputNotificationResponse*)response userText];
+    if (user_text && [user_text length] > 0) {
+      activation_value = std::string([user_text UTF8String]);
+    }
+  } else {
+    activation_type = "activate";
+    std::string value = std::string([action_id UTF8String]);
+    const std::string prefix = "action:";
+    if (value.rfind(prefix, 0) == 0) {
+      value = value.substr(prefix.size());
+    }
+    activation_value = value;
+  }
+
+  std::string request_id_value([request_id UTF8String]);
+  if (TryCompleteWithActivation(request_id_value, activation_type,
+                                activation_value)) {
+    return;
+  }
+
+  if (activation_type == "activate" && !activation_value.has_value()) {
+    NSDictionary* user_info = response.notification.request.content.userInfo;
+    NSString* open_url = user_info[kNTNOpenURLKey];
+    if (open_url && [open_url isKindOfClass:[NSString class]]) {
+      OpenURLString(std::string([open_url UTF8String]));
+    }
+  }
+}
 
 static bool IsRunningInAppBundle() {
   NSString* bundle_path = [[NSBundle mainBundle] bundlePath];
@@ -181,8 +265,23 @@ static void EnsureDelegateInstalled() {
   if (!g_delegate) {
     g_delegate = [NTNNotificationDelegate new];
   }
+  dispatch_once(&g_delegate_swizzle_once, ^{
+    Class center_class = [UNUserNotificationCenter class];
+    SEL original_selector = @selector(setDelegate:);
+    SEL swizzled_selector = @selector(ntn_setDelegate:);
+    Method original_method =
+        class_getInstanceMethod(center_class, original_selector);
+    Method swizzled_method =
+        class_getInstanceMethod(center_class, swizzled_selector);
+    method_exchangeImplementations(original_method, swizzled_method);
+  });
+
   UNUserNotificationCenter* center =
       [UNUserNotificationCenter currentNotificationCenter];
+  id<UNUserNotificationCenterDelegate> current_delegate = center.delegate;
+  if (current_delegate && current_delegate != g_delegate) {
+    g_delegate.downstreamDelegate = current_delegate;
+  }
   center.delegate = g_delegate;
 }
 
@@ -206,8 +305,8 @@ static std::shared_ptr<NotificationContext> TakePendingContext(
 
 static bool TryCompleteWithActivation(const std::string& id,
                                       const std::string& activation_type,
-                                      const std::optional<std::string>&
-                                          activation_value = std::nullopt) {
+                    const std::optional<std::string>&
+                      activation_value) {
   std::shared_ptr<NotificationContext> ctx = TakePendingContext(id);
   if (!ctx) {
     return false;
@@ -262,59 +361,93 @@ static void ScheduleTimeout(std::string notify_id, double timeout_seconds) {
 
 }  // namespace
 
+@implementation UNUserNotificationCenter (NTNDelegateProxy)
+
+- (void)ntn_setDelegate:(id<UNUserNotificationCenterDelegate>)delegate {
+  if (!g_delegate || delegate == g_delegate) {
+    [self ntn_setDelegate:delegate];
+    return;
+  }
+
+  g_delegate.downstreamDelegate = delegate;
+  [self ntn_setDelegate:g_delegate];
+}
+
+@end
+
 @implementation NTNNotificationDelegate
+
+- (BOOL)respondsToSelector:(SEL)selector {
+  if ([super respondsToSelector:selector]) {
+    return YES;
+  }
+
+  id<UNUserNotificationCenterDelegate> downstream = self.downstreamDelegate;
+  return downstream && [(id)downstream respondsToSelector:selector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)selector {
+  id<UNUserNotificationCenterDelegate> downstream = self.downstreamDelegate;
+  if (downstream && [(id)downstream respondsToSelector:selector]) {
+    return downstream;
+  }
+
+  return [super forwardingTargetForSelector:selector];
+}
 
 - (void)userNotificationCenter:(UNUserNotificationCenter*)center
        willPresentNotification:(UNNotification*)notification
          withCompletionHandler:
              (void (^)(UNNotificationPresentationOptions options))
                  completionHandler {
+  id<UNUserNotificationCenterDelegate> downstream = self.downstreamDelegate;
+  const bool is_managed = IsManagedNotification(notification);
   UNNotificationPresentationOptions options =
-      UNNotificationPresentationOptionSound;
-  if (@available(macOS 11.0, *)) {
-    options |= UNNotificationPresentationOptionBanner;
-  } else {
-    options |= UNNotificationPresentationOptionAlert;
+      is_managed ? UNNotificationPresentationOptionSound : 0;
+  if (is_managed) {
+    if (@available(macOS 11.0, *)) {
+      options |= UNNotificationPresentationOptionBanner;
+    } else {
+      options |= UNNotificationPresentationOptionAlert;
+    }
   }
+
+  if (downstream &&
+      [(id)downstream
+          respondsToSelector:@selector(userNotificationCenter:
+                                 willPresentNotification:
+                                   withCompletionHandler:)]) {
+    [downstream userNotificationCenter:center
+               willPresentNotification:notification
+                 withCompletionHandler:^(
+                     UNNotificationPresentationOptions downstream_options) {
+                   completionHandler(downstream_options | options);
+                 }];
+    return;
+  }
+
   completionHandler(options);
 }
 
 - (void)userNotificationCenter:(UNUserNotificationCenter*)center
     didReceiveNotificationResponse:(UNNotificationResponse*)response
              withCompletionHandler:(void (^)(void))completionHandler {
-  NSString* request_id = response.notification.request.identifier;
-  if (!request_id) {
-    completionHandler();
+  id<UNUserNotificationCenterDelegate> downstream = self.downstreamDelegate;
+  if (IsManagedNotification(response.notification)) {
+    HandleManagedNotificationResponse(response);
+  }
+
+  if (downstream &&
+      [(id)downstream
+          respondsToSelector:@selector(userNotificationCenter:
+                                 didReceiveNotificationResponse:
+                                   withCompletionHandler:)]) {
+    [downstream userNotificationCenter:center
+          didReceiveNotificationResponse:response
+                   withCompletionHandler:completionHandler];
     return;
   }
 
-  std::string activation_type = "activate";
-  std::optional<std::string> activation_value = std::nullopt;
-  NSString* action_id = response.actionIdentifier;
-  if ([action_id isEqualToString:UNNotificationDismissActionIdentifier]) {
-    activation_type = "dismiss";
-  } else if ([action_id
-                 isEqualToString:UNNotificationDefaultActionIdentifier]) {
-    activation_type = "activate";
-  } else if ([response isKindOfClass:[UNTextInputNotificationResponse class]]) {
-    activation_type = "replied";
-    NSString* user_text =
-        [(UNTextInputNotificationResponse*)response userText];
-    if (user_text && [user_text length] > 0) {
-      activation_value = std::string([user_text UTF8String]);
-    }
-  } else {
-    activation_type = "activate";
-    std::string value = std::string([action_id UTF8String]);
-    const std::string prefix = "action:";
-    if (value.rfind(prefix, 0) == 0) {
-      value = value.substr(prefix.size());
-    }
-    activation_value = value;
-  }
-
-  TryCompleteWithActivation(std::string([request_id UTF8String]), activation_type,
-                            activation_value);
   completionHandler();
 }
 
@@ -488,15 +621,14 @@ static Napi::Value Notify(const Napi::CallbackInfo& info) {
   content.body = [NSString stringWithUTF8String:message.c_str()];
 
   NSMutableDictionary* user_info = [NSMutableDictionary dictionary];
+  user_info[kNTNManagedNotificationKey] = @YES;
   if (!open_url.empty()) {
-    user_info[@"open"] = [NSString stringWithUTF8String:open_url.c_str()];
+    user_info[kNTNOpenURLKey] = [NSString stringWithUTF8String:open_url.c_str()];
   }
   if (reply) {
-    user_info[@"reply"] = @YES;
+    user_info[kNTNReplyKey] = @YES;
   }
-  if ([user_info count] != 0) {
-    content.userInfo = user_info;
-  }
+  content.userInfo = user_info;
 
   if (has_sound) {
     if (default_sound) {
