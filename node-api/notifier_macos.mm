@@ -3,6 +3,7 @@
 
 #include <napi.h>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -18,7 +19,8 @@ struct NotificationContext {
 };
 
 std::mutex g_contexts_mutex;
-std::unordered_map<std::string, NotificationContext*> g_contexts;
+std::unordered_map<std::string, std::shared_ptr<NotificationContext>>
+    g_contexts;
 
 NTNNotificationDelegate* g_delegate = nil;
 
@@ -50,60 +52,54 @@ static void EnsureDelegateInstalled() {
   center.delegate = g_delegate;
 }
 
-static bool TryCompleteWithActivation(const std::string& id,
-                                      const std::string& activation_value) {
-  NotificationContext* ctx = nullptr;
-  {
-    // FIXME: got a segfault (EXC_BAD_ACCESS / SIGSEGV) here.
-    std::lock_guard<std::mutex> lock(g_contexts_mutex);
-    auto it = g_contexts.find(id);
-    if (it == g_contexts.end()) {
-      return false;
-    }
-    ctx = it->second;
-    if (ctx->completed.exchange(true)) {
-      return false;
-    }
-    g_contexts.erase(it);
+static std::shared_ptr<NotificationContext> TakePendingContext(
+    const std::string& id) {
+  std::lock_guard<std::mutex> lock(g_contexts_mutex);
+  auto it = g_contexts.find(id);
+  if (it == g_contexts.end()) {
+    return nullptr;
   }
 
-  Napi::ThreadSafeFunction tsfn = ctx->tsfn;
-  tsfn.BlockingCall([activation_value](Napi::Env env, Napi::Function cb) {
+  std::shared_ptr<NotificationContext> ctx = it->second;
+  if (ctx->completed.exchange(true)) {
+    g_contexts.erase(it);
+    return nullptr;
+  }
+
+  g_contexts.erase(it);
+  return ctx;
+}
+
+static bool TryCompleteWithActivation(const std::string& id,
+                                      const std::string& activation_value) {
+  std::shared_ptr<NotificationContext> ctx = TakePendingContext(id);
+  if (!ctx) {
+    return false;
+  }
+
+  ctx->tsfn.BlockingCall([activation_value](Napi::Env env, Napi::Function cb) {
     Napi::Value err = env.Null();
     Napi::Value response = env.Null();
     Napi::Object metadata = Napi::Object::New(env);
     metadata.Set("activationValue", Napi::String::New(env, activation_value));
     cb.Call({err, response, metadata});
   });
-  tsfn.Release();
-  delete ctx;
+  ctx->tsfn.Release();
   return true;
 }
 
 static bool TryCompleteWithError(const std::string& id,
                                  const std::string& message) {
-  NotificationContext* ctx = nullptr;
-  {
-    // FIXME: likely to have the same problem as the other mutex.
-    std::lock_guard<std::mutex> lock(g_contexts_mutex);
-    auto it = g_contexts.find(id);
-    if (it == g_contexts.end()) {
-      return false;
-    }
-    ctx = it->second;
-    if (ctx->completed.exchange(true)) {
-      return false;
-    }
-    g_contexts.erase(it);
+  std::shared_ptr<NotificationContext> ctx = TakePendingContext(id);
+  if (!ctx) {
+    return false;
   }
 
-  Napi::ThreadSafeFunction tsfn = ctx->tsfn;
-  tsfn.BlockingCall([message](Napi::Env env, Napi::Function cb) {
+  ctx->tsfn.BlockingCall([message](Napi::Env env, Napi::Function cb) {
     Napi::Value err = Napi::Error::New(env, message).Value();
     cb.Call({err, env.Null(), env.Null()});
   });
-  tsfn.Release();
-  delete ctx;
+  ctx->tsfn.Release();
   return true;
 }
 
@@ -116,7 +112,7 @@ static std::string MakeActionIdentifier(const std::string& title) {
   return std::string("action:") + title;
 }
 
-static void ScheduleTimeout(const std::string& notify_id,
+static void ScheduleTimeout(std::string notify_id,
                             UNUserNotificationCenter* center,
                             double timeout_seconds) {
   if (timeout_seconds <= 0) {
@@ -124,11 +120,11 @@ static void ScheduleTimeout(const std::string& notify_id,
   }
 
   NSString* request_id = [NSString stringWithUTF8String:notify_id.c_str()];
+  std::string timeout_notify_id = std::move(notify_id);
   dispatch_time_t when = dispatch_time(
       DISPATCH_TIME_NOW, (int64_t)(timeout_seconds * NSEC_PER_SEC));
-  // FIXME: got a segfault (EXC_BAD_ACCESS / SIGSEGV) here.
   dispatch_after(when, dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-    if (TryCompleteWithActivation(notify_id, "timeout")) {
+    if (TryCompleteWithActivation(timeout_notify_id, "timeout")) {
       NSArray* identifiers = @[ request_id ];
       [center removeDeliveredNotificationsWithIdentifiers:identifiers];
       [center removePendingNotificationRequestsWithIdentifiers:identifiers];
@@ -262,8 +258,8 @@ static Napi::Value Notify(const Napi::CallbackInfo& info) {
   NSString* request_id = [NSString stringWithUTF8String:notify_id.c_str()];
 
   if (has_callback) {
-    auto* ctx = new NotificationContext{
-        Napi::ThreadSafeFunction::New(env, callback, "notify_callback", 0, 1)};
+    auto ctx = std::make_shared<NotificationContext>(NotificationContext{
+        Napi::ThreadSafeFunction::New(env, callback, "notify_callback", 0, 1)});
     std::lock_guard<std::mutex> lock(g_contexts_mutex);
     g_contexts[notify_id] = ctx;
   }
